@@ -1,0 +1,22 @@
+# Build output
+/eosfs
+
+# Object files / libraries
+*.o
+*.obj
+*.a
+*.so
+*.dylib
+*.exe
+
+# Debug symbols
+*.dSYM/
+
+# Editor / OS cruft
+*~
+*.swp
+.DS_Store
+
+# EOS block images produced when running the tool
+*.ddp
+*.dsk

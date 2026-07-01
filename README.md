@@ -167,3 +167,9 @@ describe the free extent.
 This layout is taken directly from the EOS 5 `INITIALIZE DIRECTORY`
 (Fn 47), `CREATE FILE` (Fn 51), and `DELETE FILE` (Fn 59) routines in the
 disassembly under `learn/`.
+
+## License
+
+eosfs is free software, licensed under the GNU General Public License
+version 3 or later (GPL-3.0-or-later). See [LICENSE](LICENSE) for the full
+text.

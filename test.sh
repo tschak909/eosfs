@@ -75,7 +75,7 @@ cmp -s "$TMP/blk" "$TMP/blk_out" || fail "verbatim boot block not preserved"
 ok "verbatim boot block install + preserved across add"
 
 # BLOAD loader: header 01 00 02 <load> ; loader must skip 5 and read payload
-printf '\x01\x00\x02\x00\x10' > "$TMP/bload"      # load = 0x1000
+printf '\001\000\002\000\020' > "$TMP/bload"      # load = 0x1000 (octal: portable to dash)
 head -c 2043 /dev/urandom >> "$TMP/bload"          # 2048 total -> payload 2043
 "$EOSFS" add  "$TMP/b.ddp" "$TMP/bload" --name PROGH >/dev/null
 "$EOSFS" boot "$TMP/b.ddp" --file PROGH | grep -q "BLOAD, 2043 bytes) at 1000" \

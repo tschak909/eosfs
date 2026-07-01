@@ -91,6 +91,25 @@ if "$EOSFS" attr "$TMP/a.ddp" PROG 0x01 >/dev/null 2>&1; then
 fi
 ok "attr rejects the not-a-file bit"
 
+# --- name type byte (\xHH escape) ----------------------------------------
+# runnable binaries carry a CTRL-B (0x02) type byte as the last name char;
+# the directory entry must read <name> 02 03
+"$EOSFS" add "$TMP/a.ddp" "$TMP/mid" --name 'RUNME\x02' >/dev/null
+raw=$(dd if="$TMP/a.ddp" bs=1024 skip=1 count=1 status=none | od -An -tx1 | tr -d ' \n')
+case "$raw" in
+    *52554e4d450203*) : ;;             # "RUNME" 02 03
+    *) fail "type byte not written as <name> 02 03" ;;
+esac
+# and it is displayed in caret notation and found by the escaped name
+"$EOSFS" list    "$TMP/a.ddp" | grep -qF 'RUNME^B'    || fail "type byte not shown as ^B"
+"$EOSFS" extract "$TMP/a.ddp" 'RUNME\x02' -o "$TMP/out_run" >/dev/null \
+    || fail "cannot look up a name with a type byte"
+cmp -s "$TMP/mid" "$TMP/out_run" || fail "type-byte file data mismatch"
+if "$EOSFS" add "$TMP/a.ddp" "$TMP/mid" --name 'BAD\x03' >/dev/null 2>&1; then
+    fail "0x03 in a name was not rejected"
+fi
+ok "name type byte via \\xHH escape"
+
 # --- boot blocks ---------------------------------------------------------
 # default block 0 must be DI ; JP 0FCE7H  ->  f3 c3 e7 fc
 "$EOSFS" create "$TMP/b.ddp" ddp256 >/dev/null

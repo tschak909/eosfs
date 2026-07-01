@@ -31,7 +31,9 @@
  *
  * A directory block holds 39 fixed 26-byte entries (39*26 = 1014 <= 1024).
  * Entry layout (little-endian):
- *   [0..11]  name, terminated with 0x03, space padded
+ *   [0..11]  name (up to 10 chars + a "type byte", 0x03-terminated, space
+ *            padded). The type byte is the last name char before 0x03; EOS
+ *            marks runnable binaries with a CTRL-B (0x02) there.
  *   [12]     attribute byte
  *   [13..16] start block (4)          (VOLUME entry: check code 55 AA 00 FF)
  *   [17..18] allocated length, blocks (2)
@@ -207,7 +209,8 @@ static void mkname(uint8_t out[12], const char *s)
     for (i = L + 1; i < 12; i++) out[i] = ' ';
 }
 
-/* Extract the printable name (up to 0x03) from a 12-byte field. */
+/* Extract the raw name (up to 0x03) from a 12-byte field. Used for matching, so
+ * bytes are copied verbatim, including any control-code EOS "type byte". */
 static void getname(const uint8_t f[12], char out[13])
 {
     int i;
@@ -216,6 +219,66 @@ static void getname(const uint8_t f[12], char out[13])
         out[i] = (char)f[i];
     }
     out[i] = 0;
+}
+
+/* Render a name field for display, showing control bytes in caret notation so
+ * the EOS type byte is visible (CTRL-B -> ^B) and the terminal stays intact.
+ * `out` needs up to 2*12+1 bytes. */
+static void dispname(const uint8_t f[12], char out[25])
+{
+    int i, o = 0;
+    for (i = 0; i < 12; i++) {
+        uint8_t ch = f[i];
+        if (ch == 0x03) break;
+        if (ch < 0x20 || ch == 0x7F) {
+            out[o++] = '^';
+            out[o++] = (char)(ch == 0x7F ? '?' : ch + 0x40);
+        } else {
+            out[o++] = (char)ch;
+        }
+    }
+    out[o] = 0;
+}
+
+static int hexval(int c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+/* Turn a CLI-supplied name into raw EOS name bytes, decoding \xHH and \\ so a
+ * control-code "type byte" (e.g. CTRL-B, which EOS uses for runnable binaries)
+ * can be written as PROG\x02. `out` gets a NUL-terminated result of at most
+ * cap-1 bytes. NUL and the 0x03 terminator are rejected as name bytes. */
+static void cli_name(const char *s, char *out, size_t cap)
+{
+    size_t o = 0;
+    while (*s) {
+        int c = (unsigned char)*s;
+        if (c == '\\' && (s[1] == 'x' || s[1] == 'X')) {
+            int hi = hexval((unsigned char)s[2]);
+            int lo = hi < 0 ? -1 : hexval((unsigned char)s[3]);
+            if (lo < 0)
+                die("bad \\x escape in name (expected \\xHH, two hex digits)");
+            c = hi * 16 + lo;
+            s += 4;
+        } else if (c == '\\' && s[1] == '\\') {
+            c = '\\';
+            s += 2;
+        } else if (c == '\\') {
+            die("unknown escape '\\%c' in name (use \\xHH or \\\\)",
+                s[1] ? s[1] : '?');
+        } else {
+            s++;
+        }
+        if (c == 0x00) die("a NUL byte cannot appear in an EOS name");
+        if (c == 0x03) die("0x03 is the EOS name terminator, not a name byte");
+        if (o + 1 >= cap) die("EOS name too long");
+        out[o++] = (char)c;
+    }
+    out[o] = 0;
 }
 
 /* Blocks / used / last-byte-count derived from a byte size. */
@@ -349,6 +412,16 @@ static long fs_find(const Fs *fs, const char *name)
         if (strcmp(nm, name) == 0) return (long)i;
     }
     return -1;
+}
+
+/* Like fs_find, but decodes \xHH escapes in the CLI-supplied name first, so a
+ * file whose name carries a control-code type byte can be looked up as e.g.
+ * PROG\x02. */
+static long fs_find_cli(const Fs *fs, const char *cli)
+{
+    char nm[64];
+    cli_name(cli, nm, sizeof nm);
+    return fs_find(fs, nm);
 }
 
 static void fs_free(Fs *fs)
@@ -685,7 +758,10 @@ static void usage(void)
 "                              0x0100 by default)\n"
 "          --load ADDR        load address override (hex ok, e.g. 0x100)\n"
 "          --entry ADDR       entry point (default = load address)\n\n"
-"Media type is inferred from the .ddp/.dsk extension unless --type is given.\n",
+"Media type is inferred from the .ddp/.dsk extension unless --type is given.\n"
+"EOS file names may carry a trailing 'type byte' (the char before the 0x03\n"
+"terminator); runnable binaries use CTRL-B. Give it in any name with a \\xHH\n"
+"escape, e.g. --name 'PROG\\x02' (single-quote so the shell keeps the \\).\n",
         stderr);
     exit(2);
 }
@@ -788,8 +864,8 @@ static void cmd_list(int argc, char **argv)
     fs = load(image, resolve_media(image, type));
 
     {
-        char vn[13];
-        getname(fs->vol, vn);
+        char vn[25];
+        dispname(fs->vol, vn);
         printf("Volume '%s'  %s  %u blocks (%uK)  %u directory blocks\n",
                vn, media_name(fs->media), fs->nblk, fs->nblk, fs->dirblk);
     }
@@ -799,9 +875,9 @@ static void cmd_list(int argc, char **argv)
     cur = fs->dirblk + 1;
     for (i = 0; i < fs->n; i++) {
         File *f = &fs->f[i];
-        char nm[13];
+        char nm[25];
         uint32_t nb = file_blocks(f->size);
-        getname(f->name, nm);
+        dispname(f->name, nm);
         printf("  %-12s %5u %5u %8u   0x%02X  %02u-%02u-%02u\n",
                nm, cur, nb, f->size, f->attr,
                (unsigned)((f->y + 1900) % 100), f->mo, f->d);
@@ -826,13 +902,7 @@ static void put_file(Fs *fs, const char *hostfile, const char *name_opt,
     data = read_whole(hostfile, &len);
     if (len > 0xFFFFFFFFul) die("file too large");
 
-    if (name_opt) {
-        strncpy(name, name_opt, sizeof(name) - 1);
-        name[sizeof(name) - 1] = 0;
-    } else {
-        strncpy(name, basename_of(hostfile), sizeof(name) - 1);
-        name[sizeof(name) - 1] = 0;
-    }
+    cli_name(name_opt ? name_opt : basename_of(hostfile), name, sizeof(name));
     if (name[0] == 0) die("empty EOS filename");
     if (strlen(name) > 11)
         fprintf(stderr, "eosfs: warning: name '%s' truncated to 11 chars\n", name);
@@ -905,7 +975,7 @@ static void cmd_extract(int argc, char **argv)
     if (!image || !name) usage();
 
     fs = load(image, resolve_media(image, type));
-    i = fs_find(fs, name);
+    i = fs_find_cli(fs, name);
     if (i < 0) die("'%s' not found", name);
 
     write_whole(out ? out : name, fs->f[i].data, fs->f[i].size);
@@ -927,7 +997,7 @@ static void cmd_remove(int argc, char **argv)
     if (!image || !name) usage();
 
     fs = load(image, resolve_media(image, type));
-    i = fs_find(fs, name);
+    i = fs_find_cli(fs, name);
     if (i < 0) die("'%s' not found", name);
 
     free(fs->f[i].data);
@@ -955,7 +1025,7 @@ static void cmd_attr(int argc, char **argv)
 
     attr = parse_attr(sval);
     fs = load(image, resolve_media(image, type));
-    i = fs_find(fs, name);
+    i = fs_find_cli(fs, name);
     if (i < 0) die("'%s' not found", name);
 
     fs->f[i].attr = attr;
@@ -994,7 +1064,7 @@ static void cmd_boot(int argc, char **argv)
         free(b);
         printf("Installed verbatim boot block from %s\n", blockfile);
     } else if (eosname) {
-        long fi = fs_find(fs, eosname);
+        long fi = fs_find_cli(fs, eosname);
         File *f;
         int bload;
         uint16_t load, entry;

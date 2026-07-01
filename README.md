@@ -75,6 +75,25 @@ execute-protection to that. Bits `0x01` (not-a-file) and `0x04` (deleted) are
 rejected — they would corrupt the directory or hide the file; use `remove` to
 delete.
 
+### File-name type byte
+
+An EOS name is *up to 10 characters, a **type byte**, then a `0x03` terminator*
+— i.e. the type byte is the last character of the name before `0x03`. EOS marks
+runnable binaries with a **CTRL-B (`0x02`)** type byte there. Any name argument
+(`--name`, and the `<eosname>` looked up by `extract`/`remove`/`attr`/`boot
+--file`) accepts a `\xHH` escape, so you write the byte inline:
+
+```sh
+eosfs add     game.ddp game.bin --name 'GAME\x02' --attr 0xD0   # runnable binary
+eosfs boot    game.ddp --file 'GAME\x02'
+eosfs list    game.ddp            # shows the name as GAME^B (caret notation)
+eosfs extract game.ddp 'GAME\x02' -o game.bin
+```
+
+Single-quote the name so the shell keeps the backslash. Control bytes are shown
+in caret notation by `list` (CTRL-B → `^B`). A literal backslash is `\\`; a NUL
+(`\x00`) and the terminator (`\x03`) are rejected as name bytes.
+
 ### Boot blocks
 
 Block 0 of an ADAM medium is the boot block. On power-up EOS reads it into

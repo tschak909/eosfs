@@ -59,6 +59,38 @@ roundtrip test.dsk dsk160
 "$EOSFS" create "$TMP/c.dsk" dsk -b 320 -d 5 >/dev/null
 ok "custom ddp/dsk creation"
 
+# --- file attributes -----------------------------------------------------
+"$EOSFS" create "$TMP/a.ddp" ddp256 >/dev/null
+# add with an explicit attribute, the default, and a system attribute that
+# must survive a load/store round-trip (the store() guard must not clobber it)
+"$EOSFS" add "$TMP/a.ddp" "$TMP/mid" --name PROG  --attr 0xD0 >/dev/null
+"$EOSFS" add "$TMP/a.ddp" "$TMP/mid" --name PLAIN             >/dev/null
+"$EOSFS" add "$TMP/a.ddp" "$TMP/mid" --name SYS   --attr 0xCA >/dev/null
+"$EOSFS" list "$TMP/a.ddp" | grep -q "^  PROG .* 0xD0 "  || fail "add --attr not applied"
+"$EOSFS" list "$TMP/a.ddp" | grep -q "^  PLAIN .* 0x10 " || fail "default attr not 0x10"
+"$EOSFS" list "$TMP/a.ddp" | grep -q "^  SYS .* 0xCA "   || fail "system attr lost on round-trip"
+ok "add --attr and default attributes"
+
+# attr command changes an existing file without touching its data
+"$EOSFS" attr    "$TMP/a.ddp" PLAIN 0x90 >/dev/null
+"$EOSFS" list    "$TMP/a.ddp" | grep -q "^  PLAIN .* 0x90 " || fail "attr command did not set byte"
+"$EOSFS" extract "$TMP/a.ddp" PLAIN -o "$TMP/out_plain" >/dev/null
+cmp -s "$TMP/mid" "$TMP/out_plain" || fail "attr command altered file data"
+ok "attr command sets existing file's byte"
+
+# replace keeps the attribute unless --attr is given
+"$EOSFS" replace "$TMP/a.ddp" "$TMP/big" --name PROG >/dev/null
+"$EOSFS" list    "$TMP/a.ddp" | grep -q "^  PROG .* 0xD0 " || fail "replace did not preserve attr"
+"$EOSFS" replace "$TMP/a.ddp" "$TMP/big" --name PROG --attr 0x10 >/dev/null
+"$EOSFS" list    "$TMP/a.ddp" | grep -q "^  PROG .* 0x10 " || fail "replace --attr not applied"
+ok "replace preserves / overrides attribute"
+
+# corrupting bits must be rejected
+if "$EOSFS" attr "$TMP/a.ddp" PROG 0x01 >/dev/null 2>&1; then
+    fail "not-a-file attribute 0x01 was not rejected"
+fi
+ok "attr rejects the not-a-file bit"
+
 # --- boot blocks ---------------------------------------------------------
 # default block 0 must be DI ; JP 0FCE7H  ->  f3 c3 e7 fc
 "$EOSFS" create "$TMP/b.ddp" ddp256 >/dev/null

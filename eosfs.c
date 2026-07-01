@@ -41,8 +41,14 @@
  *   [24]     month
  *   [25]     day
  *
- * Attribute bits: 0x01 = "not a file" (BLOCKS LEFT end marker),
- *                 0x04 = deleted, 0x10 = user file, 0x80 = locked/system.
+ * Attribute bits (EOS 5 directory format, offset 12):
+ *   0x01 bit0 not a file (BLOCKS LEFT terminator)  0x10 bit4 user file
+ *   0x02 bit1 execute protected                    0x20 bit5 read protected
+ *   0x04 bit2 deleted                              0x40 bit6 write protected
+ *   0x08 bit3 system (hidden from CATALOG)         0x80 bit7 delete protected
+ * So e.g. 0xD0 = a delete+write-protected user file, 0xC8 = the DIRECTORY
+ * entry (delete+write-protected system file), 0xCA = 0xC8 plus execute-
+ * protected.
  *
  * The first three entries of the directory are always VOLUME, BOOT and
  * DIRECTORY, followed by the file entries, followed by a BLOCKS LEFT entry
@@ -80,11 +86,15 @@
 #define O_MON   24
 #define O_DAY   25
 
-/* attribute bits */
-#define A_NOTFILE 0x01u
-#define A_DELETED 0x04u
-#define A_USER    0x10u
-#define A_LOCKED  0x80u
+/* attribute bits (see EOS 5 directory format) */
+#define A_NOTFILE 0x01u  /* not a file (BLOCKS LEFT terminator)   */
+#define A_EXECPRO 0x02u  /* execute protected                     */
+#define A_DELETED 0x04u  /* deleted                               */
+#define A_SYSTEM  0x08u  /* system file (hidden from CATALOG)     */
+#define A_USER    0x10u  /* user file                             */
+#define A_RDPRO   0x20u  /* read protected                        */
+#define A_WRPRO   0x40u  /* write protected (read only)           */
+#define A_LOCKED  0x80u  /* delete protected                      */
 
 /* system-entry attribute values, from the EOS INIT template */
 #define ATTR_VOL_BASE 0x80u  /* OR'd with directory-block count */
@@ -618,6 +628,28 @@ static int parse_date(const char *s, uint8_t *y, uint8_t *mo, uint8_t *d)
     return 0;
 }
 
+/* Parse a file attribute byte (hex 0x.., octal 0.., or decimal). The two bits
+ * that would corrupt a live file are rejected: bit 0 (not-a-file) terminates
+ * the directory scan, and bit 2 (deleted) hides the file. Everything else is
+ * permitted, including system (bit 3), the read/write/execute/delete protect
+ * bits, and the user-file bit. */
+static uint8_t parse_attr(const char *s)
+{
+    char *end;
+    unsigned long v = strtoul(s, &end, 0);
+    if (end == s || *end != 0)
+        die("bad attribute '%s' (expected a byte, e.g. 0xD0 or 208)", s);
+    if (v > 0xFF)
+        die("attribute 0x%lX out of range (0x00..0xFF)", v);
+    if (v & A_NOTFILE)
+        die("attribute 0x%02lX sets the 'not a file' bit (0x01), which would "
+            "corrupt the directory", v);
+    if (v & A_DELETED)
+        die("attribute 0x%02lX sets the 'deleted' bit (0x04); use 'remove' "
+            "to delete a file", v);
+    return (uint8_t)v;
+}
+
 /* ------------------------------------------------------------- commands */
 
 static void usage(void)
@@ -634,10 +666,16 @@ static void usage(void)
 "               -d, --dir-blocks N    directory blocks (default 3)\n"
 "               -b, --blocks N        block count for custom presets\n\n"
 "  eosfs list   <image> [--type ddp|dsk]\n"
-"  eosfs add    <image> <hostfile> [--name EOSNAME] [--date YYYY-MM-DD] [--type ...]\n"
-"  eosfs replace<image> <hostfile> [--name EOSNAME] [--date YYYY-MM-DD] [--type ...]\n"
+"  eosfs add    <image> <hostfile> [--name EOSNAME] [--date YYYY-MM-DD]\n"
+"                                  [--attr BYTE] [--type ...]\n"
+"  eosfs replace<image> <hostfile> [--name EOSNAME] [--date YYYY-MM-DD]\n"
+"                                  [--attr BYTE] [--type ...]\n"
 "  eosfs remove <image> <eosname> [--type ...]\n"
-"  eosfs extract<image> <eosname> [-o OUTFILE] [--type ...]\n\n"
+"  eosfs extract<image> <eosname> [-o OUTFILE] [--type ...]\n"
+"  eosfs attr   <image> <eosname> <BYTE> [--type ...]  set the attribute byte\n"
+"      BYTE is hex/decimal (e.g. 0xD0 or 208). Bits: 0x02 execute-protect,\n"
+"      0x08 system, 0x10 user, 0x20 read-protect, 0x40 write-protect,\n"
+"      0x80 delete-protect. 0x01 (not-a-file) and 0x04 (deleted) are rejected.\n\n"
 "  eosfs boot   <image> [mode] [--type ...]      set up block 0 (boot block)\n"
 "      (no mode)              jump to SmartWriter (0xFCE7); the default\n"
 "      --none                 same: jump to SmartWriter\n"
@@ -776,7 +814,7 @@ static void cmd_list(int argc, char **argv)
 }
 
 static void put_file(Fs *fs, const char *hostfile, const char *name_opt,
-                     const char *date_opt, int replace)
+                     const char *date_opt, const char *attr_opt, int replace)
 {
     uint8_t *data;
     size_t len;
@@ -814,11 +852,12 @@ static void put_file(Fs *fs, const char *hostfile, const char *name_opt,
         f->data = data;
         f->size = (uint32_t)len;
         f->y = y; f->mo = mo; f->d = d;
+        if (attr_opt) f->attr = parse_attr(attr_opt);  /* else keep existing */
     } else {
         if (existing >= 0) die("'%s' already exists (use 'replace')", name);
         f = fs_add_slot(fs);
         mkname(f->name, name);
-        f->attr = A_USER;
+        f->attr = attr_opt ? parse_attr(attr_opt) : A_USER;
         f->data = data;
         f->size = (uint32_t)len;
         f->y = y; f->mo = mo; f->d = d;
@@ -827,20 +866,21 @@ static void put_file(Fs *fs, const char *hostfile, const char *name_opt,
 
 static void cmd_put(int argc, char **argv, int replace)
 {
-    const char *image, *hostfile, *type, *name, *date;
+    const char *image, *hostfile, *type, *name, *date, *attr;
     Fs *fs;
     int idx = 2;
 
     type = opt_val(argc, argv, 2, "--type", NULL);
     name = opt_val(argc, argv, 2, "--name", "-n");
     date = opt_val(argc, argv, 2, "--date", NULL);
+    attr = opt_val(argc, argv, 2, "--attr", "-a");
 
     image    = next_pos(argc, argv, &idx);
     hostfile = next_pos(argc, argv, &idx);
     if (!image || !hostfile) usage();
 
     fs = load(image, resolve_media(image, type));
-    put_file(fs, hostfile, name, date, replace);
+    put_file(fs, hostfile, name, date, attr, replace);
     store(fs, image);
     {
         char nm[64];
@@ -896,6 +936,31 @@ static void cmd_remove(int argc, char **argv)
 
     store(fs, image);
     printf("Removed '%s' from %s\n", name, image);
+    fs_free(fs);
+}
+
+static void cmd_attr(int argc, char **argv)
+{
+    const char *image, *name, *sval, *type;
+    Fs *fs;
+    long i;
+    uint8_t attr;
+    int idx = 2;
+
+    type  = opt_val(argc, argv, 2, "--type", NULL);
+    image = next_pos(argc, argv, &idx);
+    name  = next_pos(argc, argv, &idx);
+    sval  = next_pos(argc, argv, &idx);
+    if (!image || !name || !sval) usage();
+
+    attr = parse_attr(sval);
+    fs = load(image, resolve_media(image, type));
+    i = fs_find(fs, name);
+    if (i < 0) die("'%s' not found", name);
+
+    fs->f[i].attr = attr;
+    store(fs, image);
+    printf("Set attribute of '%s' to 0x%02X in %s\n", name, attr, image);
     fs_free(fs);
 }
 
@@ -979,6 +1044,9 @@ int main(int argc, char **argv)
              strcmp(argv[1], "delete") == 0) cmd_remove(argc, argv);
     else if (strcmp(argv[1], "extract") == 0 ||
              strcmp(argv[1], "get") == 0) cmd_extract(argc, argv);
+    else if (strcmp(argv[1], "attr") == 0 ||
+             strcmp(argv[1], "setattr") == 0 ||
+             strcmp(argv[1], "chmod") == 0) cmd_attr(argc, argv);
     else if (strcmp(argv[1], "boot") == 0) cmd_boot(argc, argv);
     else usage();
     return 0;

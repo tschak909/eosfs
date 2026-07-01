@@ -35,12 +35,45 @@ eosfs create <image> <preset> [options]
              -b, --blocks N        block count for custom presets
 
 eosfs list    <image>
-eosfs add     <image> <hostfile> [--name EOSNAME] [--date YYYY-MM-DD]
-eosfs replace <image> <hostfile> [--name EOSNAME] [--date YYYY-MM-DD]
+eosfs add     <image> <hostfile> [--name EOSNAME] [--date YYYY-MM-DD] [--attr BYTE]
+eosfs replace <image> <hostfile> [--name EOSNAME] [--date YYYY-MM-DD] [--attr BYTE]
 eosfs remove  <image> <eosname>
 eosfs extract <image> <eosname> [-o OUTFILE]
+eosfs attr    <image> <eosname> <BYTE>
 eosfs boot    <image> [mode]
 ```
+
+### File attributes
+
+Byte 12 of every directory entry is the EOS **attribute byte**. `add` gives new
+files `0x10` (plain user file) unless you pass `--attr`, and `replace` keeps the
+existing attribute unless you pass `--attr`. To change the attribute of a file
+already on the image without rewriting its data, use `eosfs attr`:
+
+```sh
+eosfs add  game.ddp game.bin --name GAMEH --attr 0xD0   # write+delete protected
+eosfs attr game.ddp GAMEH 0x90                           # change it later
+```
+
+`BYTE` is hex (`0xD0`), octal (`0320`), or decimal (`208`). The set bits are
+(from the EOS 5 directory format):
+
+| bit  | mask   | meaning                                   |
+|------|--------|-------------------------------------------|
+| 0    | `0x01` | not a file (BLOCKS LEFT terminator)       |
+| 1    | `0x02` | execute protected                         |
+| 2    | `0x04` | deleted                                   |
+| 3    | `0x08` | system file (hidden from SmartBASIC CATALOG) |
+| 4    | `0x10` | user file                                 |
+| 5    | `0x20` | read protected                            |
+| 6    | `0x40` | write protected (read only)               |
+| 7    | `0x80` | delete protected                          |
+
+So `0xD0` is a write- and delete-protected user file, `0xC8` is the `DIRECTORY`
+system entry (write- and delete-protected system file), and `0xCA` adds
+execute-protection to that. Bits `0x01` (not-a-file) and `0x04` (deleted) are
+rejected — they would corrupt the directory or hide the file; use `remove` to
+delete.
 
 ### Boot blocks
 

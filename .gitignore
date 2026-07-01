@@ -1,5 +1,6 @@
 # Build output
 /eosfs
+/dist/
 
 # Object files / libraries
 *.o

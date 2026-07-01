@@ -1,0 +1,84 @@
+name: Release
+
+# Build static, standalone binaries for Linux, Windows and macOS and attach
+# them to the GitHub release. Can also be run manually (workflow_dispatch), in
+# which case the binaries are only uploaded as workflow artifacts.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CFLAGS: -std=c99 -O2 -Wall -Wextra -pedantic
+
+jobs:
+  # Linux (x86_64 + aarch64) and Windows (x86_64) are all cross-compiled from a
+  # single Ubuntu runner. Every binary here is fully statically linked, so it
+  # has no runtime library dependencies.
+  linux-windows:
+    name: Linux + Windows (static)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cross toolchains
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu gcc-mingw-w64-x86-64
+
+      - name: Build
+        run: |
+          mkdir -p dist
+          gcc                   $CFLAGS -static -s -o dist/eosfs-linux-x86_64      eosfs.c
+          aarch64-linux-gnu-gcc $CFLAGS -static -s -o dist/eosfs-linux-aarch64     eosfs.c
+          x86_64-w64-mingw32-gcc $CFLAGS -static -s -o dist/eosfs-windows-x86_64.exe eosfs.c
+
+      - name: Checksums
+        working-directory: dist
+        run: for f in *; do sha256sum "$f" > "$f.sha256"; done
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: eosfs-linux-windows
+          path: dist/*
+
+      - name: Attach to release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+
+  # macOS cannot produce a fully static executable (Apple ships no static
+  # libSystem), so this is a dynamically linked universal binary. It depends
+  # only on the system C library, which is always present on macOS.
+  macos:
+    name: macOS (universal)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build universal binary
+        run: |
+          mkdir -p dist
+          cc $CFLAGS -arch x86_64 -arch arm64 -o dist/eosfs-macos-universal eosfs.c
+          strip dist/eosfs-macos-universal
+
+      - name: Checksums
+        working-directory: dist
+        run: shasum -a 256 eosfs-macos-universal > eosfs-macos-universal.sha256
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: eosfs-macos
+          path: dist/*
+
+      - name: Attach to release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$GITHUB_REF_NAME" dist/* --clobber
